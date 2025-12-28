@@ -3,7 +3,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use melsec_plc::{Device, MelsecClient, BitDevice, WordDevice};
+use melsec_plc::{Device, MelsecClient, BitDevice, WordDevice, KafkaProducer, PlcReadResult};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
@@ -32,8 +32,9 @@ enum InputMode {
     EditingNetwork,
     EditingPc,
     EditingDeviceType,
-    EditingStartAddr,
-    EditingCount,
+    EditingAddresses,
+    EditingKafkaBrokers,
+    EditingKafkaTopic,
 }
 
 struct App {
@@ -52,8 +53,7 @@ struct App {
     
     // 읽기 설정
     device_type: String,
-    start_address: String,
-    count: String,
+    addresses: Vec<String>,
     is_bit_device: bool,
     
     // 데이터
@@ -65,6 +65,13 @@ struct App {
     auto_read: bool,
     read_interval_ms: u64,
     last_read_time: Option<std::time::Instant>,
+    
+    // Kafka 설정
+    kafka_producer: Option<KafkaProducer>,
+    kafka_brokers: String,
+    kafka_topic: String,
+    kafka_enabled: bool,
+    kafka_error: String,
     
     // 메시지 수신기
     message_rx: Option<mpsc::Receiver<AppMessage>>,
@@ -89,8 +96,7 @@ impl App {
             connection_error: String::new(),
             connecting: false,
             device_type: "D".to_string(),
-            start_address: "0".to_string(),
-            count: "10".to_string(),
+            addresses: vec!["D100".to_string(), "D200".to_string(), "D300".to_string()],
             is_bit_device: false,
             word_data: Vec::new(),
             bit_data: Vec::new(),
@@ -98,6 +104,11 @@ impl App {
             auto_read: false,
             read_interval_ms: 500,
             last_read_time: None,
+            kafka_producer: None,
+            kafka_brokers: std::env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".to_string()),
+            kafka_topic: std::env::var("KAFKA_TOPIC").unwrap_or_else(|_| "melsec-plc-data".to_string()),
+            kafka_enabled: false,
+            kafka_error: String::new(),
             message_rx: None,
             rt_handle,
             should_quit: false,
@@ -146,17 +157,14 @@ impl App {
         if !self.connected {
             return;
         }
-        
+
         let client = match &self.client {
             Some(c) => Arc::clone(c),
             None => return,
         };
-        
-        let device_type = self.device_type.clone();
-        let start_addr_str = self.start_address.clone();
-        let count_str = self.count.clone();
-        let is_bit = self.is_bit_device;
-        
+
+        let addresses = self.addresses.clone();
+
         let (tx, rx) = mpsc::channel(10);
         if let Some(old_rx) = self.message_rx.take() {
             let mut old_rx = old_rx;
@@ -165,86 +173,117 @@ impl App {
             }
         }
         self.message_rx = Some(rx);
-        
+
         let handle = self.rt_handle.clone();
         handle.spawn(async move {
-            let start_addr = match start_addr_str.parse::<u16>() {
-                Ok(addr) => addr,
-                Err(e) => {
-                    let _ = tx.send(AppMessage::Error(format!("주소 파싱 오류: {}", e))).await;
-                    return;
-                }
-            };
-            
-            let count = match count_str.parse::<u16>() {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = tx.send(AppMessage::Error(format!("개수 파싱 오류: {}", e))).await;
-                    return;
-                }
-            };
-            
             let mut client_guard = client.lock().await;
-            
-            if is_bit {
-                let device = match device_type.as_str() {
-                    "X" => Device::Bit(BitDevice::X),
-                    "Y" => Device::Bit(BitDevice::Y),
-                    "M" => Device::Bit(BitDevice::M),
-                    "L" => Device::Bit(BitDevice::L),
-                    "F" => Device::Bit(BitDevice::F),
-                    "V" => Device::Bit(BitDevice::V),
-                    "B" => Device::Bit(BitDevice::B),
-                    "SB" => Device::Bit(BitDevice::SB),
-                    _ => {
-                        let _ = tx.send(AppMessage::Error("알 수 없는 비트 디바이스".to_string())).await;
-                        return;
-                    }
-                };
-                
-                match client_guard.read_bits(device, start_addr, count).await {
-                    Ok(bits) => {
-                        let mut data = Vec::new();
-                        for (i, &bit) in bits.iter().enumerate() {
-                            data.push((start_addr + i as u16, bit));
+
+            let mut word_data = Vec::new();
+            let mut bit_data = Vec::new();
+
+            for addr_str in addresses {
+                if let Some((device, addr_num)) = Device::from_str(&addr_str) {
+                    match device {
+                        Device::Bit(_) => {
+                            match client_guard.read_bit(device, addr_num).await {
+                                Ok(bit) => bit_data.push((addr_num, bit)),
+                                Err(e) => {
+                                    let _ = tx.send(AppMessage::Error(format!("{} 읽기 오류: {}", addr_str, e))).await;
+                                    return;
+                                }
+                            }
                         }
-                        let _ = tx.send(AppMessage::BitData(data)).await;
-                    }
-                    Err(e) => {
-                        let _ = tx.send(AppMessage::Error(format!("읽기 오류: {}", e))).await;
-                    }
-                }
-            } else {
-                let device = match device_type.as_str() {
-                    "D" => Device::Word(WordDevice::D),
-                    "W" => Device::Word(WordDevice::W),
-                    "SD" => Device::Word(WordDevice::SD),
-                    "SW" => Device::Word(WordDevice::SW),
-                    "FD" => Device::Word(WordDevice::FD),
-                    "R" => Device::Word(WordDevice::R),
-                    "ZR" => Device::Word(WordDevice::ZR),
-                    _ => {
-                        let _ = tx.send(AppMessage::Error("알 수 없는 워드 디바이스".to_string())).await;
-                        return;
-                    }
-                };
-                
-                match client_guard.read_words(device, start_addr, count).await {
-                    Ok(words) => {
-                        let mut data = Vec::new();
-                        for (i, &word) in words.iter().enumerate() {
-                            data.push((start_addr + i as u16, word));
+                        Device::Word(_) => {
+                            match client_guard.read_word(device, addr_num).await {
+                                Ok(word) => word_data.push((addr_num, word)),
+                                Err(e) => {
+                                    let _ = tx.send(AppMessage::Error(format!("{} 읽기 오류: {}", addr_str, e))).await;
+                                    return;
+                                }
+                            }
                         }
-                        let _ = tx.send(AppMessage::WordData(data)).await;
                     }
-                    Err(e) => {
-                        let _ = tx.send(AppMessage::Error(format!("읽기 오류: {}", e))).await;
-                    }
+                } else {
+                    let _ = tx.send(AppMessage::Error(format!("잘못된 주소 형식: {}", addr_str))).await;
+                    return;
                 }
             }
+
+            // 결과를 전송
+            if !word_data.is_empty() {
+                let _ = tx.send(AppMessage::WordData(word_data)).await;
+            }
+            if !bit_data.is_empty() {
+                let _ = tx.send(AppMessage::BitData(bit_data)).await;
+            }
         });
-        
+
         self.last_read_time = Some(std::time::Instant::now());
+    }
+
+    fn connect_kafka(&mut self) {
+        if self.kafka_producer.is_some() {
+            return; // 이미 연결됨
+        }
+
+        match KafkaProducer::new(&self.kafka_brokers, &self.kafka_topic) {
+            Ok(producer) => {
+                let handle = self.rt_handle.clone();
+                let brokers = self.kafka_brokers.clone();
+                let topic = self.kafka_topic.clone();
+                
+                // 비동기 연결 테스트 (에러는 로그로만 출력)
+                handle.spawn(async move {
+                    let producer_clone = match KafkaProducer::new(&brokers, &topic) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("⚠️  Kafka Producer 생성 실패 ({}): {}", brokers, e);
+                            return;
+                        }
+                    };
+                    
+                    match producer_clone.test_connection().await {
+                        Ok(_) => {
+                            match producer_clone.check_topic().await {
+                                Ok(true) => {
+                                    // 토픽 존재, 연결 성공
+                                }
+                                Ok(false) => {
+                                    eprintln!("⚠️  Kafka 토픽 '{}'이 존재하지 않습니다. Kafka Admin Tool로 토픽을 생성해주세요.", topic);
+                                }
+                                Err(e) => {
+                                    eprintln!("⚠️  Kafka 토픽 확인 실패: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("⚠️  Kafka 연결 실패 ({}): {}", brokers, e);
+                        }
+                    }
+                });
+                
+                self.kafka_producer = Some(producer);
+                self.kafka_error.clear();
+            }
+            Err(e) => {
+                self.kafka_error = format!("Kafka 연결 실패: {}", e);
+            }
+        }
+    }
+
+    fn disconnect_kafka(&mut self) {
+        self.kafka_producer = None;
+        self.kafka_error.clear();
+    }
+
+    fn toggle_kafka(&mut self) {
+        if self.kafka_producer.is_some() {
+            self.disconnect_kafka();
+            self.kafka_enabled = false;
+        } else {
+            self.connect_kafka();
+            self.kafka_enabled = self.kafka_producer.is_some();
+        }
     }
     
     fn handle_message(&mut self, msg: AppMessage) {
@@ -261,19 +300,80 @@ impl App {
                 self.connected = false;
             }
             AppMessage::WordData(data) => {
-                self.word_data = data;
+                self.word_data = data.clone();
                 self.last_error.clear();
+                
+                // Kafka 전송
+                if self.kafka_enabled {
+                    if let Some(ref producer) = self.kafka_producer {
+                        let producer_clone = match KafkaProducer::new(&self.kafka_brokers, &self.kafka_topic) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                self.kafka_error = format!("Kafka Producer 생성 실패: {}", e);
+                                return;
+                            }
+                        };
+                        let addresses = self.addresses.clone();
+                        let handle = self.rt_handle.clone();
+                        
+                        handle.spawn(async move {
+                            let result = PlcReadResult::new(data, Vec::new(), &addresses);
+                            if let Err(e) = producer_clone.send_plc_data(&result).await {
+                                eprintln!("Kafka 전송 실패: {}", e);
+                            }
+                        });
+                    }
+                }
             }
             AppMessage::BitData(data) => {
-                self.bit_data = data;
+                self.bit_data = data.clone();
                 self.last_error.clear();
+                
+                // Kafka 전송
+                if self.kafka_enabled {
+                    if let Some(ref producer) = self.kafka_producer {
+                        let producer_clone = match KafkaProducer::new(&self.kafka_brokers, &self.kafka_topic) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                self.kafka_error = format!("Kafka Producer 생성 실패: {}", e);
+                                return;
+                            }
+                        };
+                        let addresses = self.addresses.clone();
+                        let word_data = self.word_data.clone();
+                        let handle = self.rt_handle.clone();
+                        
+                        handle.spawn(async move {
+                            let result = PlcReadResult::new(word_data, data, &addresses);
+                            if let Err(e) = producer_clone.send_plc_data(&result).await {
+                                eprintln!("Kafka 전송 실패: {}", e);
+                            }
+                        });
+                    }
+                }
             }
             AppMessage::Error(e) => {
                 self.last_error = e;
             }
         }
     }
-    
+
+    fn parse_addresses(&self, input: &str) -> Vec<(Device, u16)> {
+        let mut result = Vec::new();
+
+        // 줄바꿈과 쉼표로 분리
+        for line in input.split(&[',', '\n'][..]) {
+            let addr = line.trim();
+            if !addr.is_empty() {
+                if let Some((device, addr_num)) = Device::from_str(addr) {
+                    result.push((device, addr_num));
+                }
+            }
+        }
+
+        result
+    }
+
     fn process_messages(&mut self) {
         let mut messages = Vec::new();
         if let Some(rx) = &mut self.message_rx {
@@ -361,30 +461,53 @@ fn ui(f: &mut Frame<CrosstermBackend<io::Stdout>>, app: &App) {
         .borders(Borders::ALL)
         .title("읽기 설정");
     
+    let addresses_str = app.addresses.join(", ");
+    let auto_read_interval = if app.auto_read {
+        format!(" (간격: {}ms)", app.read_interval_ms)
+    } else {
+        String::new()
+    };
+    let kafka_status = if app.kafka_enabled && app.kafka_producer.is_some() {
+        "연결됨"
+    } else {
+        "연결 안됨"
+    };
+    let kafka_error_msg = if !app.kafka_error.is_empty() {
+        format!("Kafka 오류: {}", app.kafka_error)
+    } else {
+        String::new()
+    };
+    
     let mut read_text = vec![
         Line::from(vec![
-            Span::styled("디바이스: ", Style::default().fg(Color::Yellow)),
-            Span::raw(&app.device_type),
-            Span::raw("  "),
-            Span::styled("시작주소: ", Style::default().fg(Color::Yellow)),
-            Span::raw(&app.start_address),
-            Span::raw("  "),
-            Span::styled("개수: ", Style::default().fg(Color::Yellow)),
-            Span::raw(&app.count),
-            Span::raw("  "),
-            Span::styled("비트: ", Style::default().fg(Color::Yellow)),
-            Span::raw(if app.is_bit_device { "예" } else { "아니오" }),
+            Span::styled("주소 리스트: ", Style::default().fg(if matches!(app.input_mode, InputMode::EditingAddresses) { Color::Green } else { Color::Yellow })),
+            Span::raw(&addresses_str),
         ]),
         Line::from(vec![
             Span::styled("자동읽기: ", Style::default().fg(Color::Yellow)),
             Span::raw(if app.auto_read { "예" } else { "아니오" }),
-            if app.auto_read {
-                Span::raw(format!(" (간격: {}ms)", app.read_interval_ms))
-            } else {
-                Span::raw("")
-            },
+            Span::raw(&auto_read_interval),
+        ]),
+        Line::from(vec![
+            Span::styled("Kafka: ", Style::default().fg(Color::Yellow)),
+            Span::raw(kafka_status),
+            Span::raw("  "),
+            Span::styled("브로커: ", Style::default().fg(Color::Yellow)),
+            Span::raw(&app.kafka_brokers),
+            Span::raw("  "),
+            Span::styled("토픽: ", Style::default().fg(Color::Yellow)),
+            Span::raw(&app.kafka_topic),
         ]),
     ];
+    
+    if !kafka_error_msg.is_empty() {
+        read_text.push(Line::from(vec![
+            Span::styled(
+                &kafka_error_msg,
+                Style::default().fg(Color::Red),
+            ),
+        ]));
+    }
     
     if !app.last_error.is_empty() {
         read_text.push(Line::from(vec![
@@ -464,7 +587,10 @@ fn ui(f: &mut Frame<CrosstermBackend<io::Stdout>>, app: &App) {
         Span::styled("D:해제 ", Style::default().fg(Color::DarkGray)),
         Span::styled("R:읽기 ", Style::default().fg(Color::DarkGray)),
         Span::styled("A:자동읽기 ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Q:종료", Style::default().fg(Color::DarkGray)),
+        Span::styled("K:Kafka ", Style::default().fg(Color::DarkGray)),
+        Span::styled("F6:브로커 ", Style::default().fg(Color::DarkGray)),
+        Span::styled("F7:토픽 ", Style::default().fg(Color::DarkGray)),
+        Span::styled("F12:종료", Style::default().fg(Color::DarkGray)),
     ]));
     let help_area = Rect {
         x: 0,
@@ -525,7 +651,7 @@ fn main() -> io::Result<()> {
                         match app.input_mode {
                             InputMode::Normal => {
                                 match key.code {
-                                    KeyCode::Char('q') | KeyCode::Esc => {
+                                    KeyCode::F(12) => {
                                         app.should_quit = true;
                                     }
                                     KeyCode::Char('c') | KeyCode::Char('C') => {
@@ -543,6 +669,9 @@ fn main() -> io::Result<()> {
                                             app.read_data();
                                         }
                                     }
+                                    KeyCode::Char('k') | KeyCode::Char('K') => {
+                                        app.toggle_kafka();
+                                    }
                                     KeyCode::Char('a') | KeyCode::Char('A') => {
                                         app.auto_read = !app.auto_read;
                                     }
@@ -556,10 +685,13 @@ fn main() -> io::Result<()> {
                                         app.input_mode = InputMode::EditingDeviceType;
                                     }
                                     KeyCode::F(4) => {
-                                        app.input_mode = InputMode::EditingStartAddr;
+                                        app.input_mode = InputMode::EditingAddresses;
                                     }
-                                    KeyCode::F(5) => {
-                                        app.input_mode = InputMode::EditingCount;
+                                    KeyCode::F(6) => {
+                                        app.input_mode = InputMode::EditingKafkaBrokers;
+                                    }
+                                    KeyCode::F(7) => {
+                                        app.input_mode = InputMode::EditingKafkaTopic;
                                     }
                                     _ => {}
                                 }
@@ -627,39 +759,79 @@ fn main() -> io::Result<()> {
                                 _ => {                                }
                             }
                             }
-                            InputMode::EditingStartAddr => {
-                            match key.code {
-                                KeyCode::Enter => {
-                                    app.input_mode = InputMode::Normal;
+                            InputMode::EditingAddresses => {
+                                match key.code {
+                                    KeyCode::Enter => {
+                                        app.input_mode = InputMode::Normal;
+                                    }
+                                    KeyCode::Esc => {
+                                        app.input_mode = InputMode::Normal;
+                                    }
+                                    KeyCode::Char(c) => {
+                                        // 임시 문자열에 문자 추가 (실제 구현에서는 더 정교한 편집 필요)
+                                        // 간단하게 현재 addresses를 다시 파싱하여 편집
+                                        let current = app.addresses.join(", ");
+                                        let mut new_text = current;
+                                        new_text.push(c);
+
+                                        // 쉼표나 줄바꿈으로 분리하여 addresses 업데이트
+                                        app.addresses = new_text
+                                            .split(&[',', '\n'][..])
+                                            .map(|s| s.trim().to_string())
+                                            .filter(|s| !s.is_empty())
+                                            .collect();
+                                    }
+                                    KeyCode::Backspace => {
+                                        // 마지막 주소의 마지막 문자 제거
+                                        if let Some(last) = app.addresses.last_mut() {
+                                            last.pop();
+                                            if last.is_empty() {
+                                                app.addresses.pop();
+                                            }
+                                        }
+                                    }
+                                    _ => {}
                                 }
-                                KeyCode::Esc => {
-                                    app.input_mode = InputMode::Normal;
-                                }
-                                KeyCode::Char(c) if c.is_ascii_digit() => {
-                                    app.start_address.push(c);
-                                }
-                                KeyCode::Backspace => {
-                                    app.start_address.pop();
-                                }
-                                _ => {                                }
                             }
+                            InputMode::EditingKafkaBrokers => {
+                                match key.code {
+                                    KeyCode::Enter => {
+                                        app.input_mode = InputMode::Normal;
+                                        // 브로커 변경 시 재연결
+                                        app.disconnect_kafka();
+                                        app.kafka_enabled = false;
+                                    }
+                                    KeyCode::Esc => {
+                                        app.input_mode = InputMode::Normal;
+                                    }
+                                    KeyCode::Char(c) => {
+                                        app.kafka_brokers.push(c);
+                                    }
+                                    KeyCode::Backspace => {
+                                        app.kafka_brokers.pop();
+                                    }
+                                    _ => {}
+                                }
                             }
-                            InputMode::EditingCount => {
-                            match key.code {
-                                KeyCode::Enter => {
-                                    app.input_mode = InputMode::Normal;
+                            InputMode::EditingKafkaTopic => {
+                                match key.code {
+                                    KeyCode::Enter => {
+                                        app.input_mode = InputMode::Normal;
+                                        // 토픽 변경 시 재연결
+                                        app.disconnect_kafka();
+                                        app.kafka_enabled = false;
+                                    }
+                                    KeyCode::Esc => {
+                                        app.input_mode = InputMode::Normal;
+                                    }
+                                    KeyCode::Char(c) => {
+                                        app.kafka_topic.push(c);
+                                    }
+                                    KeyCode::Backspace => {
+                                        app.kafka_topic.pop();
+                                    }
+                                    _ => {}
                                 }
-                                KeyCode::Esc => {
-                                    app.input_mode = InputMode::Normal;
-                                }
-                                KeyCode::Char(c) if c.is_ascii_digit() => {
-                                    app.count.push(c);
-                                }
-                                KeyCode::Backspace => {
-                                    app.count.pop();
-                                }
-                                _ => {                                }
-                            }
                             }
                             _ => {}
                         }
