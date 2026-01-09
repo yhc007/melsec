@@ -6,6 +6,25 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
+use std::io::Write;
+
+// 패킷 디버깅 함수
+fn log_packet(direction: &str, data: &[u8]) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("packet_debug.log") {
+        let hex_str: String = data.iter()
+            .map(|b| format!("{:02X}", b))
+            .collect::<Vec<String>>()
+            .join(" ");
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let _ = writeln!(file, "[{}] {} ({} bytes): {}", timestamp, direction, data.len(), hex_str);
+    }
+}
 
 /// MELSEC PLC 클라이언트
 pub struct MelsecClient {
@@ -58,14 +77,28 @@ impl MelsecClient {
     ) -> Result<Vec<u16>> {
         let frame = self.frame_builder.build_read_frame(device, start_addr, count);
         
+        // 패킷 로깅: 전송
+        log_packet("→ SEND", &frame);
+        
         // 프레임 전송
         timeout(self.timeout, self.stream.write_all(&frame))
             .await??;
         
         // 응답 수신
         let mut header = vec![0u8; 15];
-        timeout(self.timeout, self.stream.read_exact(&mut header))
-            .await??;
+        match timeout(self.timeout, self.stream.read_exact(&mut header)).await {
+            Ok(Ok(_)) => {
+                log_packet("← RECV HEADER", &header);
+            }
+            Ok(Err(e)) => {
+                log_packet("← RECV ERROR", &[]);
+                return Err(e.into());
+            }
+            Err(e) => {
+                log_packet("← TIMEOUT", &[]);
+                return Err(e.into());
+            }
+        }
         
         // 데이터 길이 확인
         let data_len = (header[13] as usize) | ((header[14] as usize) << 8);
@@ -78,7 +111,10 @@ impl MelsecClient {
                 self.stream.read_exact(&mut response[15..])
             )
             .await??;
+            log_packet("← RECV DATA", &response[15..]);
         }
+        
+        log_packet("← RECV COMPLETE", &response);
         
         // 응답 파싱
         FrameBuilder::parse_response(&response)
@@ -93,12 +129,25 @@ impl MelsecClient {
     ) -> Result<Vec<bool>> {
         let frame = self.frame_builder.build_read_frame(device, start_addr, count);
         
+        log_packet("→ SEND", &frame);
+        
         timeout(self.timeout, self.stream.write_all(&frame))
             .await??;
         
         let mut header = vec![0u8; 15];
-        timeout(self.timeout, self.stream.read_exact(&mut header))
-            .await??;
+        match timeout(self.timeout, self.stream.read_exact(&mut header)).await {
+            Ok(Ok(_)) => {
+                log_packet("← RECV HEADER", &header);
+            }
+            Ok(Err(e)) => {
+                log_packet("← RECV ERROR", &[]);
+                return Err(e.into());
+            }
+            Err(e) => {
+                log_packet("← TIMEOUT", &[]);
+                return Err(e.into());
+            }
+        }
         
         let data_len = (header[13] as usize) | ((header[14] as usize) << 8);
         let mut response = header;
@@ -110,7 +159,10 @@ impl MelsecClient {
                 self.stream.read_exact(&mut response[15..])
             )
             .await??;
+            log_packet("← RECV DATA", &response[15..]);
         }
+        
+        log_packet("← RECV COMPLETE", &response);
         
         FrameBuilder::parse_bit_response(&response)
     }

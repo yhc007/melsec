@@ -13,10 +13,25 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as TokioMutex;
+
+// 디버그 로그 함수
+fn log_debug(msg: &str) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("tui_debug.log") {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let _ = writeln!(file, "[{}] {}", timestamp, msg);
+    }
+}
 
 enum AppMessage {
     Connected(Result<MelsecClient, String>),
@@ -53,7 +68,9 @@ struct App {
     
     // 읽기 설정
     device_type: String,
+    device_type_input: String, // 디바이스 타입 편집용 임시 버퍼
     addresses: Vec<String>,
+    address_input: String, // 주소 편집용 임시 버퍼
     is_bit_device: bool,
     
     // 데이터
@@ -65,6 +82,7 @@ struct App {
     auto_read: bool,
     read_interval_ms: u64,
     last_read_time: Option<std::time::Instant>,
+    reading_in_progress: bool, // 읽기 진행 중 플래그
     
     // Kafka 설정
     kafka_producer: Option<KafkaProducer>,
@@ -87,23 +105,26 @@ impl App {
     fn new(rt_handle: tokio::runtime::Handle) -> Self {
         Self {
             ip_address: "192.168.21.112".to_string(),
-            port: 5007,
+            port: 5010,
             network: 0,
-            pc: 0xFF,
+            pc: 0xFF, // PC 번호 255로 복원 (브로드캐스트 주소)
             input_mode: InputMode::Normal,
             client: None,
             connected: false,
             connection_error: String::new(),
             connecting: false,
             device_type: "D".to_string(),
-            addresses: vec!["D100".to_string(), "D200".to_string(), "D300".to_string()],
-            is_bit_device: false,
+            device_type_input: String::new(),
+            addresses: vec!["D120".to_string()],
+            address_input: String::new(),
+            is_bit_device: false, // D는 워드 디바이스
             word_data: Vec::new(),
             bit_data: Vec::new(),
             last_error: String::new(),
             auto_read: false,
             read_interval_ms: 500,
             last_read_time: None,
+            reading_in_progress: false,
             kafka_producer: None,
             kafka_brokers: std::env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".to_string()),
             kafka_topic: std::env::var("KAFKA_TOPIC").unwrap_or_else(|_| "melsec-plc-data".to_string()),
@@ -147,6 +168,7 @@ impl App {
     fn disconnect(&mut self) {
         if let Some(client) = self.client.take() {
             drop(client);
+            self.last_error = "PLC 연결 해제됨".to_string();
         }
         self.connected = false;
         self.client = None;
@@ -154,16 +176,42 @@ impl App {
     }
     
     fn read_data(&mut self) {
-        if !self.connected {
+        log_debug("=== read_data() 호출됨 ===");
+        
+        if self.reading_in_progress {
+            log_debug("이미 읽기 진행 중 - 건너뜀");
             return;
         }
+        
+        if !self.connected {
+            log_debug("오류: PLC에 연결되지 않음");
+            self.last_error = "PLC에 연결되지 않았습니다".to_string();
+            return;
+        }
+        log_debug("연결 상태 확인: OK");
 
         let client = match &self.client {
             Some(c) => Arc::clone(c),
-            None => return,
+            None => {
+                log_debug("오류: client가 None");
+                return;
+            }
         };
+        log_debug("클라이언트 확인: OK");
 
         let addresses = self.addresses.clone();
+        log_debug(&format!("주소 리스트: {:?}", addresses));
+
+        if addresses.is_empty() {
+            log_debug("오류: 주소가 비어있음");
+            self.last_error = "읽을 주소가 없습니다. E 키로 주소를 설정하세요".to_string();
+            return;
+        }
+
+        // 읽기 시작 표시
+        self.reading_in_progress = true;
+        self.last_error = format!("{}개 주소 읽는 중... ({})", addresses.len(), addresses.join(", "));
+        log_debug(&format!("읽기 시작: {} 주소, reading_in_progress=true", addresses.len()));
 
         let (tx, rx) = mpsc::channel(10);
         if let Some(old_rx) = self.message_rx.take() {
@@ -176,27 +224,41 @@ impl App {
 
         let handle = self.rt_handle.clone();
         handle.spawn(async move {
+            log_debug("비동기 태스크 시작");
             let mut client_guard = client.lock().await;
+            log_debug("클라이언트 락 획득");
 
             let mut word_data = Vec::new();
             let mut bit_data = Vec::new();
 
-            for addr_str in addresses {
+            for addr_str in &addresses {
+                log_debug(&format!("주소 파싱 중: {}", addr_str));
                 if let Some((device, addr_num)) = Device::from_str(&addr_str) {
+                    log_debug(&format!("파싱 성공: device={:?}, addr={}", device, addr_num));
                     match device {
                         Device::Bit(_) => {
+                            log_debug(&format!("{} 비트 읽기 시도", addr_str));
                             match client_guard.read_bit(device, addr_num).await {
-                                Ok(bit) => bit_data.push((addr_num, bit)),
+                                Ok(bit) => {
+                                    log_debug(&format!("{} 읽기 성공: {}", addr_str, bit));
+                                    bit_data.push((addr_num, bit));
+                                }
                                 Err(e) => {
+                                    log_debug(&format!("{} 읽기 실패: {}", addr_str, e));
                                     let _ = tx.send(AppMessage::Error(format!("{} 읽기 오류: {}", addr_str, e))).await;
                                     return;
                                 }
                             }
                         }
                         Device::Word(_) => {
+                            log_debug(&format!("{} 워드 읽기 시도", addr_str));
                             match client_guard.read_word(device, addr_num).await {
-                                Ok(word) => word_data.push((addr_num, word)),
+                                Ok(word) => {
+                                    log_debug(&format!("{} 읽기 성공: {}", addr_str, word));
+                                    word_data.push((addr_num, word));
+                                }
                                 Err(e) => {
+                                    log_debug(&format!("{} 읽기 실패: {}", addr_str, e));
                                     let _ = tx.send(AppMessage::Error(format!("{} 읽기 오류: {}", addr_str, e))).await;
                                     return;
                                 }
@@ -204,18 +266,27 @@ impl App {
                         }
                     }
                 } else {
+                    log_debug(&format!("파싱 실패: {}", addr_str));
                     let _ = tx.send(AppMessage::Error(format!("잘못된 주소 형식: {}", addr_str))).await;
                     return;
                 }
             }
 
+            log_debug(&format!("워드 데이터 개수: {}, 비트 데이터 개수: {}", word_data.len(), bit_data.len()));
+            
             // 결과를 전송
             if !word_data.is_empty() {
+                log_debug("워드 데이터 메시지 전송");
                 let _ = tx.send(AppMessage::WordData(word_data)).await;
-            }
-            if !bit_data.is_empty() {
+            } else if !bit_data.is_empty() {
+                log_debug("비트 데이터 메시지 전송");
                 let _ = tx.send(AppMessage::BitData(bit_data)).await;
+            } else {
+                log_debug("데이터가 없음");
+                // 데이터가 없는 경우 (이론상 발생하지 않아야 함)
+                let _ = tx.send(AppMessage::Error("읽기 완료했지만 데이터가 없습니다".to_string())).await;
             }
+            log_debug("비동기 태스크 종료");
         });
 
         self.last_read_time = Some(std::time::Instant::now());
@@ -289,19 +360,29 @@ impl App {
     fn handle_message(&mut self, msg: AppMessage) {
         match msg {
             AppMessage::Connected(Ok(client)) => {
+                log_debug("메시지 처리: 연결 성공");
                 self.client = Some(Arc::new(TokioMutex::new(client)));
                 self.connected = true;
                 self.connecting = false;
                 self.connection_error.clear();
+                self.last_error = format!("✓ PLC 연결 성공 ({}:{})", self.ip_address, self.port);
             }
             AppMessage::Connected(Err(e)) => {
-                self.connection_error = e;
+                log_debug(&format!("메시지 처리: 연결 실패 - {}", e));
+                self.connection_error = e.clone();
+                self.last_error = format!("✗ {}", e);
                 self.connecting = false;
                 self.connected = false;
             }
             AppMessage::WordData(data) => {
+                log_debug(&format!("메시지 처리: 워드 데이터 수신 ({}개)", data.len()));
+                self.reading_in_progress = false;
                 self.word_data = data.clone();
-                self.last_error.clear();
+                let values_str: Vec<String> = data.iter()
+                    .map(|(addr, val)| format!("{}{}={}", self.device_type, addr, val))
+                    .collect();
+                self.last_error = format!("✓ 읽기 성공: {}", values_str.join(", "));
+                log_debug(&format!("상태 메시지 설정: {}, reading_in_progress=false", self.last_error));
                 
                 // Kafka 전송
                 if self.kafka_enabled {
@@ -326,8 +407,14 @@ impl App {
                 }
             }
             AppMessage::BitData(data) => {
+                log_debug(&format!("메시지 처리: 비트 데이터 수신 ({}개)", data.len()));
+                self.reading_in_progress = false;
                 self.bit_data = data.clone();
-                self.last_error.clear();
+                let values_str: Vec<String> = data.iter()
+                    .map(|(addr, val)| format!("{}{}={}", self.device_type, addr, if *val { "ON" } else { "OFF" }))
+                    .collect();
+                self.last_error = format!("✓ 읽기 성공: {}", values_str.join(", "));
+                log_debug(&format!("상태 메시지 설정: {}, reading_in_progress=false", self.last_error));
                 
                 // Kafka 전송
                 if self.kafka_enabled {
@@ -353,7 +440,10 @@ impl App {
                 }
             }
             AppMessage::Error(e) => {
-                self.last_error = e;
+                log_debug(&format!("메시지 처리: 오류 수신 - {}", e));
+                self.reading_in_progress = false;
+                self.last_error = format!("✗ {}", e);
+                log_debug("reading_in_progress=false");
             }
         }
     }
@@ -380,6 +470,9 @@ impl App {
             while let Ok(msg) = rx.try_recv() {
                 messages.push(msg);
             }
+        }
+        if !messages.is_empty() {
+            log_debug(&format!("process_messages: {}개 메시지 수신", messages.len()));
         }
         for msg in messages {
             self.handle_message(msg);
@@ -478,10 +571,27 @@ fn ui(f: &mut Frame<CrosstermBackend<io::Stdout>>, app: &App) {
         String::new()
     };
     
+    let address_display = if matches!(app.input_mode, InputMode::EditingAddresses) {
+        format!("{}▊", app.address_input)
+    } else {
+        addresses_str.clone()
+    };
+
+    let device_type_display = if matches!(app.input_mode, InputMode::EditingDeviceType) {
+        format!("{}▊", app.device_type_input)
+    } else {
+        let device_kind = if app.is_bit_device { "(비트)" } else { "(워드)" };
+        format!("{} {}", app.device_type, device_kind)
+    };
+
     let mut read_text = vec![
         Line::from(vec![
+            Span::styled("디바이스 타입: ", Style::default().fg(if matches!(app.input_mode, InputMode::EditingDeviceType) { Color::Green } else { Color::Yellow })),
+            Span::raw(&device_type_display),
+        ]),
+        Line::from(vec![
             Span::styled("주소 리스트: ", Style::default().fg(if matches!(app.input_mode, InputMode::EditingAddresses) { Color::Green } else { Color::Yellow })),
-            Span::raw(&addresses_str),
+            Span::raw(&address_display),
         ]),
         Line::from(vec![
             Span::styled("자동읽기: ", Style::default().fg(Color::Yellow)),
@@ -510,10 +620,20 @@ fn ui(f: &mut Frame<CrosstermBackend<io::Stdout>>, app: &App) {
     }
     
     if !app.last_error.is_empty() {
+        let color = if app.last_error.contains("✓") || app.last_error.contains("성공") {
+            Color::Green
+        } else if app.last_error.contains("✗") || app.last_error.contains("오류") || app.last_error.contains("실패") {
+            Color::Red
+        } else if app.last_error.contains("읽는 중") {
+            Color::Cyan
+        } else {
+            Color::Yellow
+        };
         read_text.push(Line::from(vec![
+            Span::styled("상태: ", Style::default().fg(Color::Yellow)),
             Span::styled(
                 &app.last_error,
-                Style::default().fg(Color::Red),
+                Style::default().fg(color),
             ),
         ]));
     }
@@ -524,9 +644,20 @@ fn ui(f: &mut Frame<CrosstermBackend<io::Stdout>>, app: &App) {
     f.render_widget(read_paragraph, chunks[2]);
     
     // 데이터 표시
+    let data_count = if app.is_bit_device {
+        app.bit_data.len()
+    } else {
+        app.word_data.len()
+    };
+    let data_title = if data_count == 0 {
+        "데이터 (데이터 없음)".to_string()
+    } else {
+        format!("데이터 ({}개)", data_count)
+    };
+    
     let data_block = Block::default()
         .borders(Borders::ALL)
-        .title("데이터");
+        .title(data_title);
     
     if app.is_bit_device {
         let items: Vec<ListItem> = app.bit_data
@@ -580,17 +711,18 @@ fn ui(f: &mut Frame<CrosstermBackend<io::Stdout>>, app: &App) {
     
     // 도움말
     let help = Paragraph::new(Line::from(vec![
-        Span::styled("F1:IP ", Style::default().fg(Color::DarkGray)),
-        Span::styled("F2:포트 ", Style::default().fg(Color::DarkGray)),
-        Span::styled("F3:디바이스 ", Style::default().fg(Color::DarkGray)),
+        Span::styled("I:IP ", Style::default().fg(Color::DarkGray)),
+        Span::styled("P:포트 ", Style::default().fg(Color::DarkGray)),
+        Span::styled("T:디바이스 ", Style::default().fg(Color::DarkGray)),
+        Span::styled("E:주소편집 ", Style::default().fg(Color::DarkGray)),
         Span::styled("C:연결 ", Style::default().fg(Color::DarkGray)),
         Span::styled("D:해제 ", Style::default().fg(Color::DarkGray)),
         Span::styled("R:읽기 ", Style::default().fg(Color::DarkGray)),
         Span::styled("A:자동읽기 ", Style::default().fg(Color::DarkGray)),
         Span::styled("K:Kafka ", Style::default().fg(Color::DarkGray)),
-        Span::styled("F6:브로커 ", Style::default().fg(Color::DarkGray)),
-        Span::styled("F7:토픽 ", Style::default().fg(Color::DarkGray)),
-        Span::styled("F12:종료", Style::default().fg(Color::DarkGray)),
+        Span::styled("B:브로커 ", Style::default().fg(Color::DarkGray)),
+        Span::styled("O:토픽 ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Q:종료", Style::default().fg(Color::DarkGray)),
     ]));
     let help_area = Rect {
         x: 0,
@@ -602,9 +734,16 @@ fn ui(f: &mut Frame<CrosstermBackend<io::Stdout>>, app: &App) {
 }
 
 fn main() -> io::Result<()> {
+    // 로그 파일 초기화
+    if let Ok(mut file) = std::fs::File::create("tui_debug.log") {
+        let _ = writeln!(file, "=== TUI 시작 ===");
+    }
+    log_debug("메인 함수 시작");
+    
     // tokio 런타임 생성 (멀티스레드)
     let rt = tokio::runtime::Runtime::new().unwrap();
     let handle = rt.handle().clone();
+    log_debug("Tokio 런타임 생성 완료");
     
     // 백그라운드에서 런타임 실행
     let rt_handle = handle.clone();
@@ -627,10 +766,11 @@ fn main() -> io::Result<()> {
         let mut app = App::new(rt_handle);
         
         loop {
-            terminal.draw(|f| ui(f, &app))?;
-            
-            // 메시지 처리
+            // 메시지 처리 (먼저 처리)
             app.process_messages();
+            
+            // 화면 그리기
+            terminal.draw(|f| ui(f, &app))?;
             
             // 자동 읽기
             if app.auto_read && app.connected {
@@ -644,19 +784,25 @@ fn main() -> io::Result<()> {
                 }
             }
             
-            // 이벤트 처리
-            if crossterm::event::poll(Duration::from_millis(100))? {
+            // 이벤트 처리 (폴링 시간 단축)
+            if crossterm::event::poll(Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
                         match app.input_mode {
                             InputMode::Normal => {
                                 match key.code {
-                                    KeyCode::F(12) => {
+                                    KeyCode::Char('q') | KeyCode::Char('Q') => {
                                         app.should_quit = true;
                                     }
                                     KeyCode::Char('c') | KeyCode::Char('C') => {
+                                        log_debug("C 키 입력 감지");
                                         if !app.connected && !app.connecting {
+                                            log_debug(&format!("연결 시도: {}:{}", app.ip_address, app.port));
+                                            app.last_error = format!("연결 시도 중... ({}:{})", app.ip_address, app.port);
                                             app.connect();
+                                        } else if app.connected {
+                                            log_debug("이미 연결됨");
+                                            app.last_error = "이미 연결되어 있습니다".to_string();
                                         }
                                     }
                                     KeyCode::Char('d') | KeyCode::Char('D') => {
@@ -665,8 +811,13 @@ fn main() -> io::Result<()> {
                                         }
                                     }
                                     KeyCode::Char('r') | KeyCode::Char('R') => {
+                                        log_debug("R 키 입력 감지");
                                         if app.connected {
+                                            log_debug("연결 상태 OK, read_data() 호출");
                                             app.read_data();
+                                        } else {
+                                            log_debug("연결 안됨");
+                                            app.last_error = "✗ PLC에 먼저 연결하세요 (C 키)".to_string();
                                         }
                                     }
                                     KeyCode::Char('k') | KeyCode::Char('K') => {
@@ -675,22 +826,24 @@ fn main() -> io::Result<()> {
                                     KeyCode::Char('a') | KeyCode::Char('A') => {
                                         app.auto_read = !app.auto_read;
                                     }
-                                    KeyCode::F(1) => {
+                                    KeyCode::Char('i') | KeyCode::Char('I') => {
                                         app.input_mode = InputMode::EditingIp;
                                     }
-                                    KeyCode::F(2) => {
+                                    KeyCode::Char('p') | KeyCode::Char('P') => {
                                         app.input_mode = InputMode::EditingPort;
                                     }
-                                    KeyCode::F(3) => {
+                                    KeyCode::Char('t') | KeyCode::Char('T') => {
                                         app.input_mode = InputMode::EditingDeviceType;
+                                        app.device_type_input = app.device_type.clone();
                                     }
-                                    KeyCode::F(4) => {
+                                    KeyCode::Char('e') | KeyCode::Char('E') => {
                                         app.input_mode = InputMode::EditingAddresses;
+                                        app.address_input = app.addresses.join(", ");
                                     }
-                                    KeyCode::F(6) => {
+                                    KeyCode::Char('b') | KeyCode::Char('B') => {
                                         app.input_mode = InputMode::EditingKafkaBrokers;
                                     }
-                                    KeyCode::F(7) => {
+                                    KeyCode::Char('o') | KeyCode::Char('O') => {
                                         app.input_mode = InputMode::EditingKafkaTopic;
                                     }
                                     _ => {}
@@ -747,48 +900,47 @@ fn main() -> io::Result<()> {
                             InputMode::EditingDeviceType => {
                             match key.code {
                                 KeyCode::Enter => {
+                                    // 입력된 디바이스 타입을 적용
+                                    if !app.device_type_input.is_empty() {
+                                        let device_type = app.device_type_input.to_uppercase();
+                                        app.device_type = device_type.clone();
+                                        // 디바이스 타입에 따라 비트/워드 구분 설정
+                                        app.is_bit_device = matches!(device_type.as_str(),
+                                            "X" | "Y" | "M" | "L" | "F" | "V" | "B" | "SB" | "DX" | "DY");
+                                    }
                                     app.input_mode = InputMode::Normal;
                                 }
                                 KeyCode::Esc => {
                                     app.input_mode = InputMode::Normal;
                                 }
                                 KeyCode::Char(c) if c.is_ascii_alphabetic() => {
-                                    app.device_type = c.to_uppercase().to_string();
-                                    app.input_mode = InputMode::Normal;
+                                    app.device_type_input.push(c.to_ascii_uppercase());
                                 }
-                                _ => {                                }
+                                KeyCode::Backspace => {
+                                    app.device_type_input.pop();
+                                }
+                                _ => {}
                             }
                             }
                             InputMode::EditingAddresses => {
                                 match key.code {
                                     KeyCode::Enter => {
+                                        // 입력된 텍스트를 파싱하여 주소 리스트 업데이트
+                                        app.addresses = app.address_input
+                                            .split(',')
+                                            .map(|s| s.trim().to_string())
+                                            .filter(|s| !s.is_empty())
+                                            .collect();
                                         app.input_mode = InputMode::Normal;
                                     }
                                     KeyCode::Esc => {
                                         app.input_mode = InputMode::Normal;
                                     }
                                     KeyCode::Char(c) => {
-                                        // 임시 문자열에 문자 추가 (실제 구현에서는 더 정교한 편집 필요)
-                                        // 간단하게 현재 addresses를 다시 파싱하여 편집
-                                        let current = app.addresses.join(", ");
-                                        let mut new_text = current;
-                                        new_text.push(c);
-
-                                        // 쉼표나 줄바꿈으로 분리하여 addresses 업데이트
-                                        app.addresses = new_text
-                                            .split(&[',', '\n'][..])
-                                            .map(|s| s.trim().to_string())
-                                            .filter(|s| !s.is_empty())
-                                            .collect();
+                                        app.address_input.push(c);
                                     }
                                     KeyCode::Backspace => {
-                                        // 마지막 주소의 마지막 문자 제거
-                                        if let Some(last) = app.addresses.last_mut() {
-                                            last.pop();
-                                            if last.is_empty() {
-                                                app.addresses.pop();
-                                            }
-                                        }
+                                        app.address_input.pop();
                                     }
                                     _ => {}
                                 }

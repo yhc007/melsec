@@ -38,39 +38,40 @@ impl FrameBuilder {
     ) -> Bytes {
         let mut buf = BytesMut::new();
         
-        // 헤더 (11 bytes)
-        buf.put_u8(0x50); // 서브헤더
-        buf.put_u8(0x00); // 네트워크 번호
-        buf.put_u8(self.network); // PC 번호
-        buf.put_u16(self.request_id); // 요청 ID
-        buf.put_u16(0x0000); // 요청 데이터 길이 (나중에 계산)
-        buf.put_u8(0xFF); // 타이머 (고정)
-        buf.put_u8(0x03); // 타이머
-        buf.put_u8(0x00); // 명령 코드
-        buf.put_u8(0x04); // 서브명령 코드
+        // MC Protocol 3E Binary Header (11 bytes)
+        buf.put_u8(0x50); // Sub-header
+        buf.put_u8(0x00); // Sub-header
+        buf.put_u8(self.network); // Network number
+        buf.put_u8(self.pc); // PC (Station) number
+        buf.put_u16_le(0x03FF); // Request destination IO number
+        buf.put_u8(0x00); // Request destination station number
         
-        // 요청 데이터 시작 위치
-        let data_start = buf.len();
+        // Placeholder for data length (will be filled later)
+        let len_pos = buf.len();
+        buf.put_u16_le(0x0000);
         
-        // 서브헤더
-        buf.put_u8(0x00);
+        buf.put_u16_le(0x0000); // CPU monitoring timer
         
-        // 명령 코드
-        buf.put_u16_le(Command::BatchRead as u16);
+        // Request data
+        buf.put_u16_le(Command::BatchRead as u16); // Command code
+        buf.put_u16_le(0x0000); // Sub-command
         
-        // 디바이스 코드
-        buf.put_u16_le(device.code());
+        // Device code (1 byte)
+        buf.put_u8(device.code() as u8);
         
-        // 시작 주소
-        buf.put_u32_le(start_addr as u32);
+        // Start address (3 bytes, little endian)
+        let addr_24bit = start_addr as u32;
+        buf.put_u8((addr_24bit & 0xFF) as u8);
+        buf.put_u8(((addr_24bit >> 8) & 0xFF) as u8);
+        buf.put_u8(((addr_24bit >> 16) & 0xFF) as u8);
         
-        // 디바이스 포인트
+        // Device count
         buf.put_u16_le(count);
         
-        // 데이터 길이 계산 및 업데이트
-        let data_len = (buf.len() - data_start) as u16;
-        buf[7] = (data_len & 0xFF) as u8;
-        buf[8] = ((data_len >> 8) & 0xFF) as u8;
+        // Update data length
+        let data_len = (buf.len() - 11) as u16;
+        buf[len_pos] = (data_len & 0xFF) as u8;
+        buf[len_pos + 1] = ((data_len >> 8) & 0xFF) as u8;
         
         buf.freeze()
     }

@@ -73,13 +73,19 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // PLC 연결 (IP, 포트, 네트워크 번호, PC 번호)
-    let mut client = MelsecClient::connect_str("192.168.1.100", 5007, 0, 0xFF).await?;
+    let mut client = MelsecClient::connect_str("192.168.1.100", 5010, 0, 0xFF).await?;
     client.set_timeout(Duration::from_secs(3));
     
     // 워드 디바이스 읽기 (D0부터 10개)
     let values = client.read_words(Device::Word(WordDevice::D), 0, 10).await?;
     println!("D0~D9: {:?}", values);
-    
+
+    // 개별 D 디바이스 읽기 (D0, D2, D3)
+    let d0 = client.read_word(Device::Word(WordDevice::D), 0).await?;
+    let d2 = client.read_word(Device::Word(WordDevice::D), 2).await?;
+    let d3 = client.read_word(Device::Word(WordDevice::D), 3).await?;
+    println!("D0 = {}, D2 = {}, D3 = {}", d0, d2, d3);
+
     // 단일 워드 읽기
     let value = client.read_word(Device::Word(WordDevice::D), 100).await?;
     println!("D100 = {}", value);
@@ -130,7 +136,7 @@ PLC에서 다음 설정이 필요합니다:
 
 1. Ethernet 모듈 (예: E71) 설치 및 설정
 2. MC Protocol 통신 설정 활성화
-3. IP 주소 및 포트 번호 설정 (기본 포트: 5007)
+3. IP 주소 및 포트 번호 설정 (기본 포트: 5010)
 4. 네트워크 번호 및 PC 번호 확인
 
 ## 주의사항
