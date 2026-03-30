@@ -1,0 +1,62 @@
+# MELSEC PLC → AAS Bridge 설정
+
+[plc]
+# PLC IP 주소
+ip = "192.168.1.100"
+# MC Protocol 포트 (기본: 4999)
+port = 4999
+# 네트워크 번호 (기본: 0)
+network = 0
+# PC 번호 (기본: 255)
+pc = 255
+# 폴링 주기 (밀리초)
+interval_ms = 1000
+
+[aas]
+# AAS 서버 URL (BaSyx)
+server = "http://localhost:8080"
+# AAS ID (선택)
+# aas_id = "urn:melsec:aas:plc001"
+
+# PLC 디바이스 → AAS Property 매핑
+# 
+# 지원 디바이스: D, W, R, M, X, Y, B, ZR
+# 지원 데이터타입: int16, uint16, int32, uint32, float32, bool
+
+[[mappings]]
+device = "D1000"
+aas_submodel = "OperationalData"
+aas_property = "CycleTime"
+data_type = "int16"
+scale = 0.1  # 값 * 0.1 = 실제 값
+
+[[mappings]]
+device = "D1002"
+aas_submodel = "OperationalData"
+aas_property = "SpindleSpeed"
+data_type = "uint16"
+
+[[mappings]]
+device = "D1004"
+aas_submodel = "Production"
+aas_property = "TotalCount"
+data_type = "int32"
+count = 2  # 32비트는 2 워드
+
+[[mappings]]
+device = "D1006"
+aas_submodel = "Production"
+aas_property = "DailyCount"
+data_type = "int16"
+
+[[mappings]]
+device = "M100"
+aas_submodel = "Status"
+aas_property = "IsRunning"
+data_type = "bool"
+
+[[mappings]]
+device = "M101"
+aas_submodel = "Status"
+aas_property = "HasError"
+data_type = "bool"
