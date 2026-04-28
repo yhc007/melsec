@@ -1,0 +1,33 @@
+[Unit]
+Description=MELSEC PLC Data Collection Daemon (Instance 2 - 192.168.21.114)
+Documentation=https://github.com/your-repo/melsec-plc
+After=network.target kafka.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root1
+Group=root1
+WorkingDirectory=/var/lib/melsec-plc
+EnvironmentFile=/etc/melsec-plc/daemon-2.env
+ExecStart=/usr/local/bin/melsec-plc-daemon
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=melsec-plc-daemon-2
+
+# 보안 설정
+NoNewPrivileges=true
+PrivateTmp=true
+
+# 리소스 제한
+LimitNOFILE=65536
+MemoryLimit=512M
+
+# 시작 타임아웃
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
