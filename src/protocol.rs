@@ -56,20 +56,20 @@ impl FrameBuilder {
         buf.put_u16_le(Command::BatchRead as u16); // Command code
         buf.put_u16_le(0x0000); // Sub-command
         
-        // Device code (1 byte)
-        buf.put_u8(device.code() as u8);
-        
-        // Start address (3 bytes, little endian)
+        // Start address (3 bytes, little endian) - 주소를 먼저!
         let addr_24bit = start_addr as u32;
         buf.put_u8((addr_24bit & 0xFF) as u8);
         buf.put_u8(((addr_24bit >> 8) & 0xFF) as u8);
         buf.put_u8(((addr_24bit >> 16) & 0xFF) as u8);
         
+        // Device code (1 byte) - 디바이스 코드를 나중에!
+        buf.put_u8(device.code() as u8);
+        
         // Device count
         buf.put_u16_le(count);
         
-        // Update data length
-        let data_len = (buf.len() - 11) as u16;
+        // Update data length (timer 2 bytes + request data)
+        let data_len = (buf.len() - 9) as u16;  // 9 = header without timer and data length
         buf[len_pos] = (data_len & 0xFF) as u8;
         buf[len_pos + 1] = ((data_len >> 8) & 0xFF) as u8;
         
@@ -129,37 +129,43 @@ impl FrameBuilder {
 
     /// 응답 프레임 파싱
     pub fn parse_response(buf: &[u8]) -> Result<Vec<u16>> {
-        if buf.len() < 15 {
+        if buf.len() < 11 {
             return Err(MelsecError::LengthError {
-                expected: 15,
+                expected: 11,
                 actual: buf.len(),
             });
         }
         
-        // 에러 체크 (11번째 바이트)
-        if buf[10] != 0x00 {
-            return Err(MelsecError::PlcError(buf[10]));
+        // 에러 체크 (9-10번째 바이트, little endian)
+        let error_code = (buf[9] as u16) | ((buf[10] as u16) << 8);
+        if error_code != 0x0000 {
+            let error_msg = match error_code {
+                0xC056 => "지정된 디바이스가 범위를 벗어났거나 잘못된 주소입니다",
+                0xC050 => "데이터 형식 오류",
+                0xC051 => "데이터 길이 오류",
+                0xC059 => "지정된 디바이스가 존재하지 않습니다",
+                0xC05B => "읽기/쓰기 요청 길이 오류",
+                0xC05C => "ASCII 변환 오류",
+                0xC05F => "프레임 구조 오류",
+                0xC060 => "프레임 길이 오류",
+                0xC061 => "잘못된 CPU 모델",
+                _ => "알 수 없는 PLC 오류",
+            };
+            return Err(MelsecError::PlcError(error_code, error_msg.to_string()));
         }
         
-        // 데이터 길이 확인
-        let data_len = (buf[13] as u16) | ((buf[14] as u16) << 8);
-        
-        if buf.len() < 15 + data_len as usize {
-            return Err(MelsecError::LengthError {
-                expected: 15 + data_len as usize,
-                actual: buf.len(),
-            });
-        }
-        
-        // 데이터 추출 (워드 단위)
+        // 데이터 추출 (워드 단위) - 11번째 바이트부터 실제 데이터 시작
         let mut result = Vec::new();
-        let data_start = 15;
+        let data_start = 11;
         
-        for i in 0..(data_len / 2) as usize {
-            let offset = data_start + i * 2;
-            if offset + 1 < buf.len() {
-                let word = (buf[offset] as u16) | ((buf[offset + 1] as u16) << 8);
-                result.push(word);
+        if buf.len() > data_start {
+            let data_len = buf.len() - data_start;
+            for i in 0..(data_len / 2) {
+                let offset = data_start + i * 2;
+                if offset + 1 < buf.len() {
+                    let word = (buf[offset] as u16) | ((buf[offset + 1] as u16) << 8);
+                    result.push(word);
+                }
             }
         }
         
@@ -225,8 +231,22 @@ impl FrameBuilder {
             });
         }
         
-        if buf[10] != 0x00 {
-            return Err(MelsecError::PlcError(buf[10]));
+        // 에러 체크 (9-10번째 바이트, little endian)
+        let error_code = (buf[9] as u16) | ((buf[10] as u16) << 8);
+        if error_code != 0x0000 {
+            let error_msg = match error_code {
+                0xC056 => "지정된 디바이스가 범위를 벗어났거나 잘못된 주소입니다",
+                0xC050 => "데이터 형식 오류",
+                0xC051 => "데이터 길이 오류",
+                0xC059 => "지정된 디바이스가 존재하지 않습니다",
+                0xC05B => "읽기/쓰기 요청 길이 오류",
+                0xC05C => "ASCII 변환 오류",
+                0xC05F => "프레임 구조 오류",
+                0xC060 => "프레임 길이 오류",
+                0xC061 => "잘못된 CPU 모델",
+                _ => "알 수 없는 PLC 오류",
+            };
+            return Err(MelsecError::PlcError(error_code, error_msg.to_string()));
         }
         
         let data_len = (buf[13] as u16) | ((buf[14] as u16) << 8);

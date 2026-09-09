@@ -1,5 +1,5 @@
 use eframe::egui;
-use melsec_plc::{Device, MelsecClient, BitDevice, WordDevice};
+use melsec::{Device, MelsecClient, BitDevice, WordDevice};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -67,7 +67,7 @@ impl Default for PlcApp {
         
         Self {
             ip_address: "192.168.21.112".to_string(),
-            port: 5007,
+            port: 5010,
             network: 0,
             pc: 0xFF,
             client: None,
@@ -75,7 +75,7 @@ impl Default for PlcApp {
             connection_error: String::new(),
             connecting: false,
             device_type: "D".to_string(),
-            start_address: "0".to_string(),
+            start_address: "1000".to_string(),
             count: "10".to_string(),
             is_bit_device: false,
             word_data: Vec::new(),

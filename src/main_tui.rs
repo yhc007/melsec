@@ -3,11 +3,11 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use melsec_plc::{Device, MelsecClient, BitDevice, WordDevice, KafkaProducer, PlcReadResult};
+use melsec::{Device, MelsecClient, BitDevice, WordDevice, KafkaProducer, PlcReadResult};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap},
     Frame, Terminal,
@@ -90,6 +90,7 @@ struct App {
     kafka_topic: String,
     kafka_enabled: bool,
     kafka_error: String,
+    kafka_blink_state: bool,  // 깜빡임 상태 (true/false 토글)
     
     // 메시지 수신기
     message_rx: Option<mpsc::Receiver<AppMessage>>,
@@ -115,7 +116,17 @@ impl App {
             connecting: false,
             device_type: "D".to_string(),
             device_type_input: String::new(),
-            addresses: vec!["D120".to_string()],
+            addresses: vec![
+                "D1000".to_string(),
+                "D1002".to_string(),
+                "D1004".to_string(),
+                "D1006".to_string(),
+                "D1008".to_string(),
+                "D1010".to_string(),
+                "D1012".to_string(),
+                "D1014".to_string(),
+                "D1016".to_string(),
+            ],
             address_input: String::new(),
             is_bit_device: false, // D는 워드 디바이스
             word_data: Vec::new(),
@@ -130,6 +141,7 @@ impl App {
             kafka_topic: std::env::var("KAFKA_TOPIC").unwrap_or_else(|_| "melsec-plc-data".to_string()),
             kafka_enabled: false,
             kafka_error: String::new(),
+            kafka_blink_state: false,
             message_rx: None,
             rt_handle,
             should_quit: false,
@@ -155,7 +167,7 @@ impl App {
         handle.spawn(async move {
             match MelsecClient::connect_str(&ip, port, network, pc).await {
                 Ok(mut client) => {
-                    client.set_timeout(Duration::from_secs(3));
+                    client.set_timeout(Duration::from_secs(10));
                     let _ = tx.send(AppMessage::Connected(Ok(client))).await;
                 }
                 Err(e) => {
@@ -384,6 +396,13 @@ impl App {
                 self.last_error = format!("✓ 읽기 성공: {}", values_str.join(", "));
                 log_debug(&format!("상태 메시지 설정: {}, reading_in_progress=false", self.last_error));
                 
+                // 로그 파일에 값 출력
+                log_debug("=== PLC 데이터 읽기 성공 ===");
+                for (addr, val) in data.iter() {
+                    log_debug(&format!("{}{}: {} (0x{:04X})", self.device_type, addr, val, val));
+                }
+                log_debug("==========================");
+                
                 // Kafka 전송
                 if self.kafka_enabled {
                     if let Some(ref producer) = self.kafka_producer {
@@ -442,8 +461,14 @@ impl App {
             AppMessage::Error(e) => {
                 log_debug(&format!("메시지 처리: 오류 수신 - {}", e));
                 self.reading_in_progress = false;
-                self.last_error = format!("✗ {}", e);
-                log_debug("reading_in_progress=false");
+                self.last_error = format!("✗ 오류: {} | 연결: {}:{} | 타임아웃: 10초", 
+                    e, self.ip_address, self.port);
+                log_debug(&format!("reading_in_progress=false, 에러: {}", e));
+                
+                // 연결 상태도 확인
+                if e.contains("타임아웃") || e.contains("timeout") {
+                    log_debug("⚠️ PLC 타임아웃 - PLC 응답 없음. IP/포트/네트워크 확인 필요");
+                }
             }
         }
     }
@@ -606,7 +631,26 @@ fn ui(f: &mut Frame<CrosstermBackend<io::Stdout>>, app: &App) {
             Span::raw(&app.kafka_brokers),
             Span::raw("  "),
             Span::styled("토픽: ", Style::default().fg(Color::Yellow)),
-            Span::raw(&app.kafka_topic),
+            // Kafka가 연결되었을 때 토픽 이름이 깜빡임 (수동 구현)
+            if app.kafka_enabled && app.kafka_producer.is_some() {
+                if app.kafka_blink_state {
+                    Span::styled(
+                        &app.kafka_topic,
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD)
+                    )
+                } else {
+                    Span::styled(
+                        &app.kafka_topic,
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD)
+                    )
+                }
+            } else {
+                Span::raw(&app.kafka_topic)
+            },
         ]),
     ];
     
@@ -679,34 +723,66 @@ fn ui(f: &mut Frame<CrosstermBackend<io::Stdout>>, app: &App) {
             .style(Style::default().fg(Color::White));
         f.render_widget(list, chunks[3]);
     } else {
-        let rows: Vec<Row> = app.word_data
-            .iter()
-            .map(|(addr, value)| {
-                let device_name = format!("{}{}", app.device_type, addr);
-                let value_dec = value.to_string();
-                let value_hex = format!("0x{:04X}", value);
-                Row::new(vec![
-                    Cell::from(device_name),
-                    Cell::from(value_dec),
-                    Cell::from(value_hex),
+        if app.word_data.is_empty() {
+            // 데이터가 없을 때 안내 메시지 표시
+            let msg = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "📋 설정된 주소:",
+                    Style::default().fg(Color::Cyan),
+                )),
+                Line::from(""),
+            ];
+            let mut msg = msg;
+            for addr in &app.addresses {
+                msg.push(Line::from(Span::styled(
+                    format!("  • {}", addr),
+                    Style::default().fg(Color::White),
+                )));
+            }
+            msg.push(Line::from(""));
+            msg.push(Line::from(Span::styled(
+                "💡 사용법:",
+                Style::default().fg(Color::Yellow),
+            )));
+            msg.push(Line::from("  1. 'C' 키를 눌러 PLC에 연결"));
+            msg.push(Line::from("  2. 'R' 키를 눌러 데이터 읽기"));
+            msg.push(Line::from("  3. 'A' 키로 자동 읽기 On/Off"));
+            
+            let paragraph = Paragraph::new(msg)
+                .block(data_block)
+                .wrap(Wrap { trim: true });
+            f.render_widget(paragraph, chunks[3]);
+        } else {
+            let rows: Vec<Row> = app.word_data
+                .iter()
+                .map(|(addr, value)| {
+                    let device_name = format!("{}{}", app.device_type, addr);
+                    let value_dec = value.to_string();
+                    let value_hex = format!("0x{:04X}", value);
+                    Row::new(vec![
+                        Cell::from(device_name),
+                        Cell::from(value_dec),
+                        Cell::from(value_hex),
+                    ])
+                })
+                .collect();
+            
+            let table = Table::new(rows)
+                .widths(&[
+                    Constraint::Length(10),
+                    Constraint::Length(10),
+                    Constraint::Length(10),
                 ])
-            })
-            .collect();
-        
-        let table = Table::new(rows)
-            .widths(&[
-                Constraint::Length(10),
-                Constraint::Length(10),
-                Constraint::Length(10),
-            ])
-            .header(Row::new(vec![
-                Cell::from("주소").style(Style::default().fg(Color::Yellow)),
-                Cell::from("값(10진)").style(Style::default().fg(Color::Yellow)),
-                Cell::from("값(16진)").style(Style::default().fg(Color::Yellow)),
-            ]))
-            .block(data_block)
-            .style(Style::default().fg(Color::White));
-        f.render_widget(table, chunks[3]);
+                .header(Row::new(vec![
+                    Cell::from("주소").style(Style::default().fg(Color::Yellow)),
+                    Cell::from("값(10진)").style(Style::default().fg(Color::Yellow)),
+                    Cell::from("값(16진)").style(Style::default().fg(Color::Yellow)),
+                ]))
+                .block(data_block)
+                .style(Style::default().fg(Color::White));
+            f.render_widget(table, chunks[3]);
+        }
     }
     
     // 도움말
@@ -764,10 +840,17 @@ fn main() -> io::Result<()> {
         let mut terminal = Terminal::new(backend)?;
         
         let mut app = App::new(rt_handle);
+        let mut last_blink_time = std::time::Instant::now();
         
         loop {
             // 메시지 처리 (먼저 처리)
             app.process_messages();
+            
+            // Kafka 깜빡임 업데이트 (500ms마다)
+            if last_blink_time.elapsed().as_millis() >= 500 {
+                app.kafka_blink_state = !app.kafka_blink_state;
+                last_blink_time = std::time::Instant::now();
+            }
             
             // 화면 그리기
             terminal.draw(|f| ui(f, &app))?;

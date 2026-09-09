@@ -8,8 +8,8 @@ pub enum MelsecError {
     #[error("프로토콜 오류: {0}")]
     ProtocolError(String),
     
-    #[error("PLC 응답 오류: 코드 0x{0:02X}")]
-    PlcError(u8),
+    #[error("PLC 응답 오류: 코드 0x{0:04X} - {1}")]
+    PlcError(u16, String),
     
     #[error("타임아웃")]
     Timeout(#[from] tokio::time::error::Elapsed),

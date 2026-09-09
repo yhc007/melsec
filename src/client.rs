@@ -40,7 +40,12 @@ impl MelsecClient {
         network: u8,
         pc: u8,
     ) -> Result<Self> {
-        let stream = TcpStream::connect(addr).await?;
+        // 연결 타임아웃 설정 (10초)
+        let stream = match timeout(Duration::from_secs(10), TcpStream::connect(addr)).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(e) => return Err(e.into()),
+        };
         
         Ok(Self {
             stream,
@@ -84,8 +89,8 @@ impl MelsecClient {
         timeout(self.timeout, self.stream.write_all(&frame))
             .await??;
         
-        // 응답 수신
-        let mut header = vec![0u8; 15];
+        // 응답 수신 (헤더 9 bytes)
+        let mut header = vec![0u8; 9];
         match timeout(self.timeout, self.stream.read_exact(&mut header)).await {
             Ok(Ok(_)) => {
                 log_packet("← RECV HEADER", &header);
@@ -100,18 +105,18 @@ impl MelsecClient {
             }
         }
         
-        // 데이터 길이 확인
-        let data_len = (header[13] as usize) | ((header[14] as usize) << 8);
+        // 데이터 길이 확인 (header[7:8])
+        let data_len = (header[7] as usize) | ((header[8] as usize) << 8);
         let mut response = header;
-        response.resize(15 + data_len, 0);
+        response.resize(9 + data_len, 0);
         
         if data_len > 0 {
             timeout(
                 self.timeout,
-                self.stream.read_exact(&mut response[15..])
+                self.stream.read_exact(&mut response[9..])
             )
             .await??;
-            log_packet("← RECV DATA", &response[15..]);
+            log_packet("← RECV DATA", &response[9..]);
         }
         
         log_packet("← RECV COMPLETE", &response);
@@ -134,7 +139,7 @@ impl MelsecClient {
         timeout(self.timeout, self.stream.write_all(&frame))
             .await??;
         
-        let mut header = vec![0u8; 15];
+        let mut header = vec![0u8; 9];
         match timeout(self.timeout, self.stream.read_exact(&mut header)).await {
             Ok(Ok(_)) => {
                 log_packet("← RECV HEADER", &header);
@@ -149,17 +154,17 @@ impl MelsecClient {
             }
         }
         
-        let data_len = (header[13] as usize) | ((header[14] as usize) << 8);
+        let data_len = (header[7] as usize) | ((header[8] as usize) << 8);
         let mut response = header;
-        response.resize(15 + data_len, 0);
+        response.resize(9 + data_len, 0);
         
         if data_len > 0 {
             timeout(
                 self.timeout,
-                self.stream.read_exact(&mut response[15..])
+                self.stream.read_exact(&mut response[9..])
             )
             .await??;
-            log_packet("← RECV DATA", &response[15..]);
+            log_packet("← RECV DATA", &response[9..]);
         }
         
         log_packet("← RECV COMPLETE", &response);
@@ -184,8 +189,16 @@ impl MelsecClient {
             .await??;
         
         // 에러 체크만 수행
-        if response.len() > 10 && response[10] != 0x00 {
-            return Err(MelsecError::PlcError(response[10]));
+        if response.len() > 10 {
+            let error_code = (response[9] as u16) | ((response[10] as u16) << 8);
+            if error_code != 0x0000 {
+                let error_msg = match error_code {
+                    0xC056 => "지정된 디바이스가 범위를 벗어났거나 잘못된 주소입니다",
+                    0xC050 => "데이터 형식 오류",
+                    _ => "쓰기 오류",
+                };
+                return Err(MelsecError::PlcError(error_code, error_msg.to_string()));
+            }
         }
         
         Ok(())
@@ -207,8 +220,16 @@ impl MelsecClient {
         timeout(self.timeout, self.stream.read_exact(&mut response))
             .await??;
         
-        if response.len() > 10 && response[10] != 0x00 {
-            return Err(MelsecError::PlcError(response[10]));
+        if response.len() > 10 {
+            let error_code = (response[9] as u16) | ((response[10] as u16) << 8);
+            if error_code != 0x0000 {
+                let error_msg = match error_code {
+                    0xC056 => "지정된 디바이스가 범위를 벗어났거나 잘못된 주소입니다",
+                    0xC050 => "데이터 형식 오류",
+                    _ => "쓰기 오류",
+                };
+                return Err(MelsecError::PlcError(error_code, error_msg.to_string()));
+            }
         }
         
         Ok(())
