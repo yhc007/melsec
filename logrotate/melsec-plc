@@ -1,0 +1,27 @@
+# MELSEC PLC 데몬 패킷/이벤트 트레이스 로테이션
+#
+# 두 인스턴스 모두 WorkingDirectory=/var/lib/melsec-plc 이므로
+# 같은 packet_debug.log 에 함께 append 한다.
+#
+# client.rs 의 log_packet() 은 패킷마다 파일을 열고 닫는다.
+# 따라서 rename 방식(create)으로 로테이션해도 다음 쓰기에서 새 파일이
+# 자동 생성되며, copytruncate 도 데몬 재시작도 필요 없다.
+#
+# 설치: sudo install -m 644 logrotate/melsec-plc /etc/logrotate.d/melsec-plc
+# 확인: sudo logrotate -d /etc/logrotate.d/melsec-plc
+
+/var/lib/melsec-plc/packet_debug.log
+/var/lib/melsec-plc/tui_debug.log
+{
+    # 하루 한 번, 단 100MB를 넘으면 그 전에라도 로테이션
+    daily
+    maxsize 100M
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    # 데몬이 root1 로 실행되므로 새 파일 소유자를 맞춰준다
+    create 0644 root1 root1
+    su root1 root1
+}
