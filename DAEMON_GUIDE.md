@@ -107,13 +107,13 @@ sudo ./manage-daemon.sh restart
 
 # 설정 보기/편집
 ./manage-daemon.sh config-show   # 현재 설정 보기
-sudo ./manage-daemon.sh config   # 설정 편집
+sudo ./manage-daemon.sh config 1 # 설정 편집
 
 # 통계 확인
 ./manage-daemon.sh stats
 
 # Kafka 메시지 확인
-./manage-daemon.sh kafka
+./manage-daemon.sh kafka 1
 ```
 
 ## ⚙️ 설정
@@ -127,7 +127,7 @@ PLC_PORT=5010                # PLC 포트
 
 # Kafka 설정
 KAFKA_BROKERS=localhost:9092  # Kafka 브로커 주소
-KAFKA_TOPIC=melsec-plc-data   # 전송할 토픽 이름
+KAFKA_TOPIC=melsec-plc-data-1 # 전송할 토픽 이름 (2호기는 melsec-plc-data-2)
 
 # 읽기 설정
 START_ADDRESS=1000            # 시작 주소 (D1000)
@@ -145,7 +145,7 @@ RUST_LOG=info                 # error, warn, info, debug, trace
 sudo nano /etc/melsec-plc/daemon.env
 
 # 또는 관리 스크립트 사용
-sudo ./manage-daemon.sh config
+sudo ./manage-daemon.sh config 1
 
 # 2. 서비스 재시작 (설정 적용)
 sudo systemctl restart melsec-plc-daemon
@@ -316,10 +316,10 @@ ps aux | grep melsec-plc-daemon
 
 ```bash
 # 관리 스크립트 사용
-./manage-daemon.sh kafka
+./manage-daemon.sh kafka 1
 
 # 또는 직접 확인
-kafkacat -b localhost:9092 -t melsec-plc-data -C
+kafkacat -b localhost:9092 -t melsec-plc-data-1 -C
 ```
 
 ## 🗂️ 파일 위치

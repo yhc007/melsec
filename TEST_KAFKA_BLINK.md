@@ -80,6 +80,14 @@ export KAFKA_BROKERS=localhost:9092
 export KAFKA_TOPIC=melsec-plc-data
 ```
 
+> **주의 — 운영 토픽을 쓰지 말 것**
+>
+> 운영 수집 토픽은 `melsec-plc-data-1`(1호기), `melsec-plc-data-2`(2호기)이며
+> RSpring 대시보드가 이를 소비한다. TUI 는 조회한 값을 그대로 **발행**하므로,
+> `KAFKA_TOPIC` 을 이 두 토픽으로 지정하면 수동 조회 값이 운영 데이터에 섞인다.
+> 이 문서의 `melsec-plc-data` 처럼 별도 토픽을 쓸 것.
+> (`melsec-plc-data` 는 코드 기본값이기도 하며, 읽는 소비자가 없다.)
+
 ## 실행 예제
 
 ```bash

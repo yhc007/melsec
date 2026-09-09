@@ -74,7 +74,7 @@ DISPLAY=:0 ./target/release/melsec-plc
 PLC_IP=192.168.21.112 \
 PLC_PORT=5010 \
 KAFKA_BROKERS=localhost:9092 \
-KAFKA_TOPIC=melsec-plc-data \
+KAFKA_TOPIC=melsec-plc-data-1 \
 RUST_LOG=info \
 ./target/release/melsec-plc-daemon
 ```
@@ -112,7 +112,11 @@ journalctl -u melsec-plc-daemon -f
 
 기본값:
 - Brokers: `localhost:9092`
-- Topic: `melsec-plc-data`
+- Topic: 1호기 `melsec-plc-data-1`, 2호기 `melsec-plc-data-2`
+
+토픽은 `KAFKA_TOPIC` 으로 지정한다 (`/etc/melsec-plc/daemon.env`,
+`daemon-2.env`). 지정하지 않으면 코드 기본값인 `melsec-plc-data` 로
+발행되는데, 이 토픽을 읽는 소비자는 없다.
 
 Kafka 시작:
 
@@ -158,16 +162,16 @@ nc -zv 192.168.21.112 5010
 
 ```bash
 # kafkacat 사용
-kafkacat -b localhost:9092 -t melsec-plc-data -C
+kafkacat -b localhost:9092 -t melsec-plc-data-1 -C
 
 # 또는 Kafka console consumer
 kafka-console-consumer.sh \
     --bootstrap-server localhost:9092 \
-    --topic melsec-plc-data \
+    --topic melsec-plc-data-1 \
     --from-beginning
 
 # 또는 관리 스크립트
-./manage-daemon.sh kafka
+./manage-daemon.sh kafka 1
 ```
 
 ---

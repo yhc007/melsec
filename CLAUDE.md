@@ -47,7 +47,7 @@ systemd install layout (set up by `install-daemon.sh`):
 | `/etc/systemd/system/melsec-plc-daemon.service` | unit (runs as `root1:root1`) |
 | `/var/lib/melsec-plc/` | WorkingDirectory |
 
-The unit pins `User=root1`, so it is **not** portable across hosts — change before deploying elsewhere. `manage-daemon.sh` is a convenience wrapper around systemctl/journalctl/kafkacat for this service. `uninstall-daemon.sh` removes the install but backs up the env file to `/tmp`.
+The unit pins `User=root1`, so it is **not** portable across hosts — change before deploying elsewhere. `manage-daemon.sh`, `install-daemon.sh` and `uninstall-daemon.sh` all take an instance argument (`1`, `2` or `all`, defaulting to `all`); `manage-daemon.sh`'s `config` and `kafka` subcommands require a specific instance. `uninstall-daemon.sh` removes the install but backs up the env file to `/tmp`.
 
 ## Default dev target
 
@@ -76,6 +76,6 @@ The full error-code table is duplicated inline in `protocol.rs` at both `parse_r
 ## Conventions
 
 - **Korean is the default language** for log messages, comments, error strings, and TUI labels. Keep new code in Korean unless the user asks otherwise (matches the workspace-wide convention).
-- The Kafka topic name `melsec-plc-data` is **this project's own convention** and does NOT match the workspace `cnc-*` topic family used by the FOCAS/MTConnect adapters — this daemon is a standalone collector, not part of the CNC pipeline.
+- The Kafka topic names `melsec-plc-data-1` (PLC 192.168.21.112) and `melsec-plc-data-2` (192.168.21.114) are **this project's own convention** and does NOT match the workspace `cnc-*` topic family used by the FOCAS/MTConnect adapters — this daemon is a standalone collector, not part of the CNC pipeline.
 - `Cargo.lock` is in `.gitignore` here (atypical for a binary crate — be aware before committing it).
 - Many `.md` files at the repo root are user-facing run/troubleshooting guides in Korean (`RUN.md`, `RUN_TUI.md`, `DAEMON_GUIDE.md`, `QUICKSTART.md`, `TROUBLESHOOTING.md`, `PROBLEM_SOLUTION.md`). Treat them as documentation, not stale scratch.
