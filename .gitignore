@@ -25,6 +25,11 @@ Thumbs.db
 # Debug
 *.dSYM/
 
+# Logs
+# client.rs / main_tui.rs 가 실행 시 CWD에 남기는 패킷·이벤트 트레이스.
+# 실행할 때마다 통째로 바뀌므로 추적하지 않는다 (CLAUDE.md 참고).
+*.log
+
 # Environment
 .env
 .env.local
