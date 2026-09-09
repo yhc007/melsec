@@ -8,8 +8,28 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 use std::io::Write;
 
+/// 패킷 트레이스 활성화 여부
+///
+/// PACKET_TRACE 가 1/true/on/yes 일 때만 기록한다. 기본값은 꺼짐.
+/// 예전에는 무조건 기록해서 packet_debug.log 가 끝없이 커졌다
+/// (운영 환경에서 약 4개월 만에 2.2GB). 환경변수는 프로세스당 한 번만 읽는다.
+fn packet_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| match std::env::var("PACKET_TRACE") {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes"
+        ),
+        Err(_) => false,
+    })
+}
+
 // 패킷 디버깅 함수
 fn log_packet(direction: &str, data: &[u8]) {
+    if !packet_trace_enabled() {
+        return;
+    }
+
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

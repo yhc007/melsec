@@ -35,7 +35,7 @@ The daemon is configured **entirely through environment variables** (see `Daemon
 
 ```
 PLC_IP, PLC_PORT, KAFKA_BROKERS, KAFKA_TOPIC,
-START_ADDRESS, READ_COUNT, READ_INTERVAL_MS, RUST_LOG
+START_ADDRESS, READ_COUNT, READ_INTERVAL_MS, RUST_LOG, PACKET_TRACE
 ```
 
 systemd install layout (set up by `install-daemon.sh`):
