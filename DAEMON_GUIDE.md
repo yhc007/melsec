@@ -131,11 +131,14 @@ KAFKA_TOPIC=melsec-plc-data-1 # 전송할 토픽 이름 (2호기는 melsec-plc-d
 
 # 읽기 설정
 START_ADDRESS=1000            # 시작 주소 (D1000)
-READ_COUNT=10                 # 읽을 개수
+READ_COUNT=17                 # 읽을 개수 (D1000~D1016)
 READ_INTERVAL_MS=1000         # 읽기 간격 (밀리초)
 
 # 로그 레벨
 RUST_LOG=info                 # error, warn, info, debug, trace
+
+# 패킷 트레이스 (기본 꺼짐, 진단 시에만 1)
+#PACKET_TRACE=1
 ```
 
 ### 설정 변경

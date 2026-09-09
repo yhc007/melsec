@@ -51,7 +51,7 @@ The unit pins `User=root1`, so it is **not** portable across hosts — change be
 
 ## Default dev target
 
-Throughout the code (defaults in `DaemonConfig::from_env`, the GUI/TUI initial state, examples) the dev PLC is **`192.168.21.112:5010`**, network=0, PC=0xFF, reading **`D1000`–`D1009`**. Recent commit `00f7a4d` moved the default port from 5007 → 5010 — when reading old docs/screenshots assume 5007 may appear.
+Throughout the code (defaults in `DaemonConfig::from_env`, the GUI/TUI initial state, examples) the dev PLC is **`192.168.21.112:5010`**, network=0, PC=0xFF, reading **`D1000`–`D1009`**. Both deployed instances override this with `READ_COUNT=17` (`D1000`–`D1016`) in their env files. Recent commit `00f7a4d` moved the default port from 5007 → 5010 — when reading old docs/screenshots assume 5007 may appear.
 
 ## Architecture notes
 
