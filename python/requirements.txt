@@ -1,0 +1,8 @@
+# PLC 통신용 라이브러리
+pymcprotocol>=0.3.0
+
+# GUI용 (선택사항)
+tkinter-tooltip>=2.1.0
+
+# 데이터 처리용 (선택사항)
+pandas>=2.0.0

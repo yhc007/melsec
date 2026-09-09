@@ -30,6 +30,12 @@ Thumbs.db
 # 실행할 때마다 통째로 바뀌므로 추적하지 않는다 (CLAUDE.md 참고).
 *.log
 
+# Python (python/ 의 병행 구현)
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+
 # Environment
 .env
 .env.local
